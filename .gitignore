@@ -4,3 +4,4 @@ __pycache__/
 /*.svg
 /*.png
 /durhack_word_list.csv
+/hand_landmarker.task
