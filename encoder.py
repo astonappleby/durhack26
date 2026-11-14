@@ -5,6 +5,32 @@ import csv
 from pathlib import Path
 
 
+FINGER_PATTERNS = [
+    "".join(str((number >> finger) & 1) for finger in range(5))
+    for number in range(32)
+]
+# Finger order is thumb, index, middle, ring, pinky. Exclude the UK offensive
+# back-of-hand V sign (index + middle), middle finger alone, and thumb + middle.
+BANNED_BACK_PATTERNS = {"01100", "00100", "10100"}
+FRONT_STATES = 4 * len(FINGER_PATTERNS)
+BACK_PATTERNS = [bits for bits in FINGER_PATTERNS if bits not in BANNED_BACK_PATTERNS]
+HAND_RADIX = FRONT_STATES + 4 * len(BACK_PATTERNS)  # 244 states per hand
+HAND_CODES = HAND_RADIX**6
+
+
+def _describe_hand(code: int) -> str:
+    """Convert one base-244 digit into its pose description."""
+    if code < FRONT_STATES:
+        view = "F"
+        direction_index, pattern_index = divmod(code, 32)
+        bits = FINGER_PATTERNS[pattern_index]
+    else:
+        view = "B"
+        direction_index, pattern_index = divmod(code - FRONT_STATES, len(BACK_PATTERNS))
+        bits = BACK_PATTERNS[pattern_index]
+    return f"{view} {'NESW'[direction_index]} {bits}"
+
+
 def load_words(path: Path) -> list[str]:
     with path.open(newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
@@ -15,8 +41,8 @@ def load_words(path: Path) -> list[str]:
         raise ValueError("Word list must contain nonempty words.")
     if len(set(words)) != len(words):
         raise ValueError("Word list contains duplicate words.")
-    if len(words) ** 3 > 2**48:
-        raise ValueError("Word list is too large for six hands (48 bits).")
+    if len(words) ** 3 > HAND_CODES:
+        raise ValueError(f"Word list is too large for six hands ({HAND_CODES:,} allowed codes).")
     return words
 
 
@@ -30,14 +56,13 @@ def encode(words: list[str], vocabulary: list[str]) -> tuple[int, str, list[str]
             raise ValueError(f"Unknown word: {word!r}")
         number = number * len(vocabulary) + indices[word]
 
-    binary = format(number, "048b")
-    hands = []
-    for offset in range(0, 48, 8):
-        chunk = binary[offset : offset + 8]
-        orientation = "FB"[int(chunk[0])]
-        direction = "NESW"[int(chunk[1:3], 2)]
-        hands.append(f"{orientation} {direction} {chunk[3:]}")
-    return number, binary, hands
+    digits = [0] * 6
+    remaining = number
+    for index in range(5, -1, -1):
+        remaining, digits[index] = divmod(remaining, HAND_RADIX)
+    code = " ".join(str(digit) for digit in digits)
+    hands = [_describe_hand(digit) for digit in digits]
+    return number, code, hands
 
 
 def main() -> None:
@@ -53,13 +78,13 @@ def main() -> None:
     words = [word.strip().lower() for word in args.words]
     try:
         vocabulary = load_words(args.word_list)
-        number, binary, hands = encode(words, vocabulary)
+        number, code, hands = encode(words, vocabulary)
     except (OSError, ValueError, csv.Error) as error:
         parser.error(str(error))
 
     print(f"Words: {' '.join(words)}")
     print(f"Denary: {number}")
-    print(f"Binary (48 bits): {binary}")
+    print(f"Hand codes (base {HAND_RADIX}): {code}")
     print("Hand representation:")
     for pair in range(3):
         print(f"Pair {pair + 1}: L {hands[pair * 2]} | R {hands[pair * 2 + 1]}")

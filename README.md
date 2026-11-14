@@ -20,3 +20,15 @@ python3 encode_and_make_hands.py WORD1 WORD2 WORD3 --word-list /path/to/words.cs
 
 Rebuild the pose assets from the bundled original GIF with
 `python3 extract_hand_frames.py` (requires Pillow).
+
+Decode three text pairs back into words:
+
+```sh
+python3 decoder.py "Pair 1: L F N 00000 | R F N 00000
+Pair 2: L F E 10101 | R B E 00101
+Pair 3: L B S 10011 | R F W 00011"
+```
+
+Alternatively use `python3 decoder.py --input poses.txt`, or pipe pair text into
+stdin. Use `--word-list /path/to/words.csv` if needed. Decoding requires exactly
+the same word list in the same order as encoding.

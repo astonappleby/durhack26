@@ -48,16 +48,23 @@ def draw_hand(side: str, view: str, direction: str, bits: str) -> str:
             f'<g transform="scale({mirror} 1)">{ET.tostring(pose, encoding="unicode")}</g></g>')
 
 
+def raised_fingers(bits: str) -> str:
+    """Return the names of the fingers marked as raised in thumb-to-pinky order."""
+    names = ('thumb', 'index', 'middle', 'ring', 'pinky')
+    raised = [name for name, bit in zip(names, bits) if bit == '1']
+    return 'Raised: ' + (', '.join(raised) if raised else 'none')
+
+
 def make_svg(pair: str) -> str:
     cards = []
     for x, (side, view, direction, bits) in zip((0, 320), parse_pair(pair)):
-        title = f'{side} · {"palm" if view == "F" else "back"} · {direction} · {bits}'
+        title = f'{side} · {"palm" if view == "F" else "back"} · {direction}'
         cards.append(
             f'<g transform="translate({x} 0)">'
             '<rect x="10" y="10" width="300" height="350" rx="18" fill="#faf7f2" stroke="#ded9d0"/>'
             f'<text x="160" y="38" text-anchor="middle" font-family="sans-serif" font-size="17" fill="#333">{html.escape(title)}</text>'
             + draw_hand(side, view, direction, bits)
-            + '<text x="160" y="340" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#666">thumb · index · middle · ring · pinky</text></g>')
+            + f'<text x="160" y="340" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#666">{html.escape(raised_fingers(bits))}</text></g>')
     return ('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="370" viewBox="0 0 640 370">'
             '<title>Hand pair</title><desc>Finger binary artwork by LucasBrown, CC0; dark fill denotes back of hand.</desc>'
             '<rect width="640" height="370" fill="#eeeae4"/>' + ''.join(cards) + '</svg>')

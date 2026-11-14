@@ -11,7 +11,7 @@ import html
 from pathlib import Path
 
 from encoder import encode, load_words
-from make_hand import draw_hand
+from make_hand import draw_hand, raised_fingers
 
 
 def make_svg(hands: list[str]) -> str:
@@ -26,7 +26,7 @@ def make_svg(hands: list[str]) -> str:
         cards: list[str] = []
         for x, (side, description) in zip((0, 320), zip(("L", "R"), row_hands)):
             view, direction, bits = description.split()
-            title = f'{side} · {"palm" if view == "F" else "back"} · {direction} · {bits}'
+            title = f'{side} · {"palm" if view == "F" else "back"} · {direction}'
             cards.append(
                 f'<g transform="translate({x} 0)">'
                 '<rect x="10" y="10" width="300" height="350" rx="18" '
@@ -35,7 +35,7 @@ def make_svg(hands: list[str]) -> str:
                 f'font-size="17" fill="#333">{html.escape(title)}</text>'
                 + draw_hand(side, view, direction, bits)
                 + '<text x="160" y="340" text-anchor="middle" font-family="sans-serif" '
-                'font-size="12" fill="#666">thumb · index · middle · ring · pinky</text></g>'
+                f'font-size="12" fill="#666">{html.escape(raised_fingers(bits))}</text></g>'
             )
         rows.append(f'<g transform="translate(0 {y})">' + ''.join(cards) + '</g>')
 
@@ -65,7 +65,7 @@ def main() -> None:
     words = [word.strip().lower() for word in args.words]
     try:
         vocabulary = load_words(args.word_list)
-        number, binary, hands = encode(words, vocabulary)
+        number, code, hands = encode(words, vocabulary)
         svg = make_svg(hands)
         args.output.write_text(svg, encoding="utf-8")
     except (OSError, ValueError, csv.Error) as error:
@@ -73,7 +73,7 @@ def main() -> None:
 
     print(f"Words: {' '.join(words)}")
     print(f"Denary: {number}")
-    print(f"Binary (48 bits): {binary}")
+    print(f"Hand codes (base 244): {code}")
     print(f"Wrote {args.output.resolve()}")
 
 
