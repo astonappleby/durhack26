@@ -1,7 +1,6 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-/hand.svg
-/hands.svg
-/hands.png
+/*.svg
+/*.png
 /durhack_word_list.csv
