@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Record three webcam hand pairs with three-second holds and decode the words."""
+"""Decode three hand-pair photos or live three-second holds; optionally save captures."""
 from __future__ import annotations
 
 import argparse
 from collections import deque
 import csv
 from pathlib import Path
+import tempfile
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from urllib.request import urlopen
 
 from decoder import decode, parse_pairs
@@ -100,111 +101,326 @@ class PairRecorder:
 class DecoderGUI:
     def __init__(self, root: tk.Tk, vocabulary: list[str], camera_index: int,
                  swap_hands: bool, model: Path) -> None:
-        # Keep the timing logic importable without loading camera dependencies.
         import cv2
         import mediapipe as mp
         from camera_pair import describe
 
         self.cv2, self.mp, self.describe = cv2, mp, describe
         self.root, self.vocabulary, self.swap_hands = root, vocabulary, swap_hands
+        self.camera_index, self.model = camera_index, model
         self.recorder = PairRecorder()
         self.history = {side: deque(maxlen=5) for side in "LR"}
-        self.camera = None
-        self.detector = None
-        self.after_id = None
-        self.photo = None
+        self.camera = self.detector = self.image_detector = None
+        self.after_id = self.photo = self.preview_image = None
         self.closed = False
         self.last_timestamp = -1
+        self.image_pairs = [None] * 3
+        self.image_frames = [None] * 3
+        self.image_paths = [None] * 3
+        self.capture_frames = []
+        self.save_errors = {}
+        self.session_folder = None
+        self.saving_enabled = False
+        self.output_directory = Path(__file__).with_name("captures")
 
         root.title("Decode hand signals")
-        root.geometry("1000x900")
-        root.minsize(740, 760)
-        outer = ttk.Frame(root, padding=18)
-        outer.pack(fill="both", expand=True)
+        root.geometry(f"1040x{min(840, root.winfo_screenheight() - 120)}")
+        root.minsize(740, 480)
+        # Keep the result visible while the camera and controls scroll above it.
+        results = ttk.Frame(root)
+        results.pack(side="bottom", fill="x", padx=18, pady=(8, 18))
+        scroll_host = ttk.Frame(root)
+        scroll_host.pack(fill="both", expand=True)
+        self.scroll_canvas = tk.Canvas(scroll_host, highlightthickness=0,
+                                       background=root.cget("background"), yscrollincrement=18)
+        scrollbar = ttk.Scrollbar(scroll_host, orient="vertical", command=self.scroll_canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+        outer = self.scroll_body = ttk.Frame(self.scroll_canvas, padding=18)
+        self.scroll_window = self.scroll_canvas.create_window((0, 0), window=outer, anchor="nw")
+        self.scroll_canvas.bind("<Configure>", self.update_scroll_area)
+        outer.bind("<Configure>", self.update_scroll_area)
+        self.window_system = root.tk.call("tk", "windowingsystem")
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind(event, self.scroll_wheel, add="+")
         ttk.Label(outer, text="Decode three hand pairs", font=("TkDefaultFont", 21, "bold")).pack(anchor="w")
-        ttk.Label(outer, text="Hold both hands still for 3 seconds per pair. Words appear after pair 3.").pack(anchor="w", pady=(4, 10))
-        self.preview_frame = ttk.Frame(outer, height=440)
+        modes = ttk.Frame(outer)
+        modes.pack(fill="x", pady=(8, 4))
+        self.mode = tk.StringVar(value="live")
+        self.current_mode = "live"
+        for text, value in (("Live camera", "live"), ("Upload photos", "photos")):
+            ttk.Radiobutton(modes, text=text, value=value, variable=self.mode,
+                            command=self.select_mode).pack(side="left", padx=(0, 18))
+        self.hint = ttk.Label(outer, text="Hold both hands still for 3 seconds per pair. Words appear after pair 3.")
+        self.hint.pack(anchor="w", pady=(0, 6))
+        self.settings = ttk.Frame(outer)
+        self.settings.pack(fill="x", pady=(0, 6))
+        self.save_images = tk.BooleanVar(value=False)
+        self.save_check = ttk.Checkbutton(self.settings, text="Save a photo for each live capture",
+                                          variable=self.save_images)
+        self.save_check.pack(side="left")
+        self.folder_button = ttk.Button(self.settings, text="Save folder…", command=self.choose_folder)
+        self.folder_button.pack(side="left", padx=8)
+        self.photos_are_mirrored = tk.BooleanVar(value=True)
+        self.mirror_check = ttk.Checkbutton(
+            self.settings, text="Photos already use selfie view (including saved captures)",
+            variable=self.photos_are_mirrored, command=self.photo_orientation_changed)
+        self.destination = ttk.Label(outer, text=f"Save to: {self.output_directory}", wraplength=760)
+        self.destination.pack(anchor="w", pady=(0, 6))
+        self.preview_frame = ttk.Frame(outer, height=400)
         self.preview_frame.pack(fill="both", expand=True)
-        self.preview = ttk.Label(self.preview_frame, anchor="center")
+        self.preview = ttk.Label(self.preview_frame, text="Choose a mode, then start recording or upload photos.", anchor="center")
         self.preview.place(relx=0.5, rely=0.5, anchor="center")
-        self.live = ttk.Label(outer, text="Opening camera…", font=("TkFixedFont", 12))
-        self.live.pack(pady=(10, 4))
-        self.status = ttk.Label(outer, text="Press Start recording when ready.", wraplength=700)
+        self.preview_frame.bind("<Configure>", self.resize_preview)
+        self.live = ttk.Label(outer, text="Camera opens when you start recording.", font=("TkFixedFont", 12))
+        self.live.pack(pady=(8, 4))
+        self.status = ttk.Label(outer, text="Press Start recording when ready.", wraplength=760)
         self.status.pack(anchor="w", pady=4)
         self.progress = ttk.Progressbar(outer, maximum=HOLD_SECONDS)
-        self.progress.pack(fill="x", pady=(0, 10))
-        self.slots = []
-        for index in range(1, 4):
-            slot = ttk.Label(outer, text=f"Pair {index}: waiting", font=("TkFixedFont", 12))
-            slot.pack(anchor="w", pady=3)
+        self.progress.pack(fill="x", pady=(0, 8))
+        self.slots, self.upload_buttons, self.view_buttons = [], [], []
+        for index in range(3):
+            row = ttk.Frame(outer)
+            row.pack(fill="x", pady=3)
+            slot = ttk.Label(row, text=f"Pair {index + 1}: waiting", font=("TkFixedFont", 11))
+            slot.pack(side="left", fill="x", expand=True)
             self.slots.append(slot)
+            upload = ttk.Button(row, text="Upload photo…", command=lambda i=index: self.upload_photo(i))
+            view = ttk.Button(row, text="View", command=lambda i=index: self.view_photo(i))
+            self.upload_buttons.append(upload)
+            self.view_buttons.append(view)
         actions = ttk.Frame(outer)
-        actions.pack(fill="x", pady=12)
+        actions.pack(fill="x", pady=10)
         self.start_button = ttk.Button(actions, text="Start recording", command=self.start)
         self.start_button.pack(side="left")
         self.undo_button = ttk.Button(actions, text="Redo last pair", command=self.undo, state="disabled")
         self.undo_button.pack(side="left", padx=8)
         ttk.Button(actions, text="Copy pairs", command=self.copy_pairs).pack(side="left")
         ttk.Button(actions, text="Quit", command=self.close).pack(side="right")
-        ttk.Label(outer, text="Decoded words", font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
+        ttk.Label(results, text="Decoded words", font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
         self.words = tk.StringVar()
-        ttk.Entry(outer, textvariable=self.words, state="readonly",
-                  font=("TkDefaultFont", 21)).pack(fill="x", pady=(6, 0))
+        self.words_entry = ttk.Entry(results, textvariable=self.words, state="readonly",
+                                     font=("TkDefaultFont", 21))
+        self.words_entry.pack(fill="x", pady=(6, 0))
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<Escape>", lambda _event: self.close())
 
-        try:
-            self.camera = cv2.VideoCapture(camera_index)
-            if not self.camera.isOpened():
-                raise RuntimeError("Cannot open camera. Allow camera access or try --camera 1.")
-            options = mp.tasks.vision.HandLandmarkerOptions(
-                base_options=mp.tasks.BaseOptions(model_asset_path=str(model)),
-                running_mode=mp.tasks.vision.RunningMode.VIDEO,
-                num_hands=2,
-            )
-            self.detector = mp.tasks.vision.HandLandmarker.create_from_options(options)
-        except Exception:
-            self.release_camera()
-            raise
-        self.after_id = root.after(0, self.tick)
+    def update_scroll_area(self, _event=None) -> None:
+        width = self.scroll_canvas.winfo_width()
+        height = max(self.scroll_body.winfo_reqheight(), self.scroll_canvas.winfo_height())
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=width, height=height)
+        self.scroll_canvas.configure(scrollregion=(0, 0, width, height))
 
-    def start(self) -> None:
-        self.recorder.start()
+    def scroll_wheel(self, event) -> str:
+        if event.num == 4:
+            units = -1
+        elif event.num == 5:
+            units = 1
+        elif self.window_system == "aqua":
+            units = -int(event.delta)
+        else:
+            units = -int(event.delta / 120) or (-1 if event.delta > 0 else 1)
+        self.scroll_canvas.yview_scroll(units, "units")
+        return "break"
+
+    def create_detector(self, running_mode):
+        options = self.mp.tasks.vision.HandLandmarkerOptions(
+            base_options=self.mp.tasks.BaseOptions(model_asset_path=str(self.model)),
+            running_mode=running_mode, num_hands=2)
+        return self.mp.tasks.vision.HandLandmarker.create_from_options(options)
+
+    def choose_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Choose where to save captured photos", parent=self.root)
+        if folder:
+            self.output_directory = Path(folder)
+            self.destination.config(text=f"Save to: {self.output_directory}")
+
+    def reset_set(self) -> None:
+        self.recorder = PairRecorder()
+        self.image_pairs = [None] * 3
+        self.image_frames = [None] * 3
+        self.image_paths = [None] * 3
+        self.capture_frames = []
+        self.save_errors = {}
+        self.session_folder = None
         self.words.set("")
         self.progress["value"] = 0
+        self.destination.config(text=f"Save to: {self.output_directory}")
         for samples in self.history.values():
             samples.clear()
         self.refresh_slots()
+
+    def select_mode(self) -> None:
+        if self.mode.get() != self.current_mode:
+            self.change_mode()
+
+    def change_mode(self) -> None:
+        self.current_mode = self.mode.get()
+        self.stop_live()
+        self.reset_set()
+        self.photo = self.preview_image = None
+        self.preview.config(image="", text="Upload one photo of both hands for each pair." if self.mode.get() == "photos"
+                            else "Press Start recording to open the camera.")
+        photos = self.mode.get() == "photos"
+        self.live.config(text="No photo selected." if photos else "Camera opens when you start recording.")
+        self.hint.config(text="Upload pairs 1, 2 and 3. Each photo must contain both hands." if photos
+                         else "Hold both hands still for 3 seconds per pair. Words appear after pair 3.")
+        self.start_button.config(text="Clear photos" if photos else "Start recording", state="normal")
+        self.status.config(text="Choose a photo for each pair, in sequence." if photos else "Press Start recording when ready.")
+        if photos:
+            self.save_check.pack_forget()
+            self.folder_button.pack_forget()
+            self.mirror_check.pack(side="left")
+            self.destination.pack_forget()
+        else:
+            self.mirror_check.pack_forget()
+            self.save_check.pack(side="left")
+            self.folder_button.pack(side="left", padx=8)
+            self.destination.pack(before=self.preview_frame, anchor="w", pady=(0, 6))
+
+    def start(self) -> None:
+        if self.mode.get() == "photos":
+            self.change_mode()
+            return
+        # Restarting a set leaves earlier saved sets in their own folders.
+        self.stop_live()
+        self.reset_set()
+        try:
+            self.camera = self.cv2.VideoCapture(self.camera_index)
+            if not self.camera.isOpened():
+                raise RuntimeError("Cannot open camera. Allow camera access or try --camera 1. You can also use Upload photos.")
+            self.detector = self.create_detector(self.mp.tasks.vision.RunningMode.VIDEO)
+        except Exception as error:
+            self.stop_live()
+            self.status.config(text=str(error))
+            return
+        self.recorder.start()
+        self.saving_enabled = self.save_images.get()
+        self.save_check.config(state="disabled")
+        self.folder_button.config(state="disabled")
         self.start_button.config(text="Restart set")
+        self.after_id = self.root.after(0, self.tick)
 
     def undo(self) -> None:
+        if self.mode.get() != "live" or not self.recorder.pairs:
+            return
+        if self.session_folder is not None:
+            # Remove only the generated snapshot for the pair being replaced.
+            path = self.session_folder / f"pair_{len(self.recorder.pairs)}.png"
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                self.status.config(text=f"Could not remove the old capture: {error}")
+                return
         self.recorder.undo()
+        self.save_errors.pop(len(self.recorder.pairs), None)
+        if self.capture_frames:
+            self.capture_frames.pop()
         self.words.set("")
         self.progress["value"] = 0
+        self.save_check.config(state="disabled")
+        self.folder_button.config(state="disabled")
         self.refresh_slots()
 
     def refresh_slots(self) -> None:
+        photos = self.mode.get() == "photos"
         for index, slot in enumerate(self.slots):
-            pair = self.recorder.pairs[index] if index < len(self.recorder.pairs) else "waiting"
-            slot.config(text=f"Pair {index + 1}: {pair}")
-        self.undo_button.config(state="normal" if self.recorder.pairs else "disabled")
+            pair = self.image_pairs[index] if photos else (
+                self.recorder.pairs[index] if index < len(self.recorder.pairs) else None)
+            slot.config(text=f"Pair {index + 1}: {pair or 'waiting'}")
+            if photos:
+                self.view_buttons[index].pack(side="right", padx=(4, 0))
+                self.view_buttons[index].config(state="normal" if pair else "disabled")
+                self.upload_buttons[index].pack(side="right")
+                self.upload_buttons[index].config(text="Replace photo…" if pair else "Upload photo…")
+            else:
+                self.upload_buttons[index].pack_forget()
+                self.view_buttons[index].pack_forget()
+        self.undo_button.config(state="normal" if not photos and self.recorder.pairs else "disabled")
+
+    def pair_text(self) -> str:
+        pairs = self.image_pairs if self.mode.get() == "photos" else self.recorder.pairs
+        return "\n".join(f"Pair {i}: {pair}" for i, pair in enumerate(pairs, 1) if pair is not None)
 
     def copy_pairs(self) -> None:
-        if self.recorder.pairs:
+        if self.pair_text():
             self.root.clipboard_clear()
             self.root.clipboard_append(self.pair_text())
 
-    def pair_text(self) -> str:
-        return "\n".join(f"Pair {i}: {pair}" for i, pair in enumerate(self.recorder.pairs, 1))
+    def decode_set(self) -> str:
+        try:
+            _, _, words = decode(parse_pairs(self.pair_text()), self.vocabulary)
+            self.words.set(" ".join(words))
+            return "Decoded! Replace a photo or clear the set." if self.mode.get() == "photos" else "Decoded! Start a new set, or redo the last pair."
+        except ValueError as error:
+            self.words.set("")
+            return f"Could not decode: {error} Check the pairs or restart the set."
 
-    def observe(self, frame):
-        """Use camera_pair's classifications and the same five-frame voting."""
+    def upload_photo(self, index: int) -> None:
+        path = filedialog.askopenfilename(
+            title=f"Choose photo for pair {index + 1}", parent=self.root,
+            filetypes=[("Hand photos", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*")])
+        if path:
+            self.load_photo(index, Path(path))
+
+    def load_photo(self, index: int, path: Path) -> None:
+        try:
+            frame = self.cv2.imread(str(path))
+            if frame is None:
+                raise ValueError("Cannot read this image. Choose a PNG, JPEG, WebP, or BMP photo.")
+            if not self.photos_are_mirrored.get():
+                frame = self.cv2.flip(frame, 1)
+            height, width = frame.shape[:2]
+            if max(height, width) > 1600:
+                scale = 1600 / max(height, width)
+                frame = self.cv2.resize(frame, (round(width * scale), round(height * scale)))
+            display_pair, pair, _, _ = self.observe(frame, still=True)
+            self.live.config(text=display_pair)
+            self.show_preview(frame)
+            problem = pair_problem(pair)
+            if problem:
+                raise ValueError(problem)
+        except Exception as error:
+            # A failed replacement leaves the previous valid photo and pair intact.
+            self.status.config(text=f"Pair {index + 1} not loaded: {error}")
+            return
+        self.image_pairs[index] = pair
+        self.image_frames[index] = frame
+        self.image_paths[index] = path
+        self.words.set("")
+        self.refresh_slots()
+        count = sum(pair is not None for pair in self.image_pairs)
+        self.progress["value"] = count
+        status = self.decode_set() if count == 3 else f"Pair {index + 1} loaded from {path.name}. {count}/3 photos ready."
+        self.status.config(text=status)
+
+    def view_photo(self, index: int) -> None:
+        if self.image_frames[index] is not None:
+            self.show_preview(self.image_frames[index])
+            self.live.config(text=self.image_pairs[index])
+
+    def photo_orientation_changed(self) -> None:
+        # Re-read the originals so the same transform is never applied twice.
+        paths = list(self.image_paths)
+        self.reset_set()
+        for index, path in enumerate(paths):
+            if path is not None:
+                self.load_photo(index, path)
+
+    def observe(self, frame, *, still=False):
+        """Recognize photos independently; smooth only consecutive video frames."""
         cv2, mp = self.cv2, self.mp
         height, width = frame.shape[:2]
         image = mp.Image(image_format=mp.ImageFormat.SRGB,
                          data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        self.last_timestamp = max(self.last_timestamp + 1, time.monotonic_ns() // 1_000_000)
-        result = self.detector.detect_for_video(image, self.last_timestamp)
+        if still:
+            if self.image_detector is None:
+                self.image_detector = self.create_detector(mp.tasks.vision.RunningMode.IMAGE)
+            result = self.image_detector.detect(image)
+        else:
+            self.last_timestamp = max(self.last_timestamp + 1, time.monotonic_ns() // 1_000_000)
+            result = self.detector.detect_for_video(image, self.last_timestamp)
         hands = {}
         for labels, landmarks in zip(result.handedness, result.hand_landmarks):
             side = {"Left": "R", "Right": "L"}[labels[0].category_name]
@@ -215,13 +431,15 @@ class DecoderGUI:
         descriptions, points = {}, []
         for side in "LR":
             if side not in hands:
-                self.history[side].clear()
+                if not still:
+                    self.history[side].clear()
                 descriptions[side] = f"{side} -- -- -----"
                 continue
             landmarks = hands[side][1]
             fields = self.describe(side, landmarks, width, height).split()
-            samples = self.history[side]
-            samples.append(fields)
+            samples = [fields] if still else self.history[side]
+            if not still:
+                samples.append(fields)
             bits = "".join(str(int(sum(int(s[3][i]) for s in samples) > len(samples) / 2))
                            for i in range(5))
             view = fields[1]
@@ -237,68 +455,106 @@ class DecoderGUI:
         valid = len(hands) == 2 and all("?" not in text for text in descriptions.values())
         return pair, pair if valid else None, tuple(points), len(hands) == 2
 
+    def save_capture(self, frame, index: int) -> str:
+        if self.session_folder is None:
+            self.output_directory.mkdir(parents=True, exist_ok=True)
+            self.session_folder = Path(tempfile.mkdtemp(prefix="set-", dir=self.output_directory))
+        path = self.session_folder / f"pair_{index + 1}.png"
+        if not self.cv2.imwrite(str(path), frame):
+            raise OSError(f"Could not save {path}")
+        return str(path)
+
+    def show_preview(self, frame) -> None:
+        self.preview_image = frame
+        self.resize_preview()
+
+    def resize_preview(self, _event=None) -> None:
+        if self.preview_image is None:
+            return
+        frame = self.preview_image
+        height, width = frame.shape[:2]
+        scale = min(max(1, self.preview_frame.winfo_width()) / width,
+                    max(1, self.preview_frame.winfo_height()) / height)
+        preview = self.cv2.resize(frame, (max(1, round(width * scale)), max(1, round(height * scale))))
+        encoded, png = self.cv2.imencode(".png", preview)
+        if not encoded:
+            raise RuntimeError("Could not render the camera preview.")
+        self.photo = tk.PhotoImage(data=png.tobytes())
+        self.preview.config(image=self.photo, text="")
+
     def tick(self) -> None:
         self.after_id = None
-        if self.closed:
+        if self.closed or self.mode.get() != "live" or self.camera is None:
             return
         try:
             ok, frame = self.camera.read()
             if not ok:
-                raise RuntimeError("Could not read a camera frame. Check the camera and restart the GUI.")
+                raise RuntimeError("Could not read a camera frame. Check the camera and restart, or use Upload photos.")
             frame = self.cv2.flip(frame, 1)
+            clean_frame = frame.copy()
             display_pair, pair, points, visible = self.observe(frame)
             self.live.config(text=display_pair)
-            progress, captured, status = self.recorder.update(
-                pair, points, time.monotonic(), both_visible=visible)
+            progress, captured, status = self.recorder.update(pair, points, time.monotonic(), both_visible=visible)
             if captured:
+                self.capture_frames.append(clean_frame)
+                save_error = None
+                if self.saving_enabled:
+                    try:
+                        self.save_capture(clean_frame, len(self.recorder.pairs) - 1)
+                        self.save_errors.pop(len(self.recorder.pairs) - 1, None)
+                    except OSError as error:
+                        save_error = str(error)
+                        self.save_errors[len(self.recorder.pairs) - 1] = save_error
+                    if self.save_errors:
+                        missing = ", ".join(str(index + 1) for index in sorted(self.save_errors))
+                        self.destination.config(text=f"Photo save failed for pair(s) {missing}: {next(iter(self.save_errors.values()))}")
+                    else:
+                        self.destination.config(text=f"Saved captures: {self.session_folder}")
                 self.refresh_slots()
                 self.root.bell()
                 if len(self.recorder.pairs) == 3:
-                    try:
-                        _, _, words = decode(parse_pairs(self.pair_text()), self.vocabulary)
-                        self.words.set(" ".join(words))
-                        status = "Decoded! Start a new set, or redo the last pair."
-                    except ValueError as error:
-                        self.words.set("")
-                        status = f"Could not decode: {error} Redo the last pair or restart the set."
+                    status = self.decode_set()
                     self.start_button.config(text="Record new set")
-            # Preserve the result/error while continuing the camera preview.
+                    self.save_check.config(state="normal")
+                    self.folder_button.config(state="normal")
+                if save_error:
+                    status += f" Photo was not saved: {save_error}"
+                elif len(self.recorder.pairs) == 3 and self.save_errors:
+                    status += " Some capture photos could not be saved; see the save status above."
             if self.recorder.active or captured or not self.recorder.pairs:
                 self.status.config(text=status)
                 self.progress["value"] = progress * HOLD_SECONDS
-            height, width = frame.shape[:2]
-            scale = min(max(1, self.preview_frame.winfo_width()) / width,
-                        max(1, self.preview_frame.winfo_height()) / height)
-            preview = self.cv2.resize(frame, (max(1, round(width * scale)),
-                                              max(1, round(height * scale))))
-            encoded, png = self.cv2.imencode(".png", preview)
-            if not encoded:
-                raise RuntimeError("Could not render the camera preview.")
-            self.photo = tk.PhotoImage(data=png.tobytes())
-            self.preview.config(image=self.photo)
+            self.show_preview(frame)
         except Exception as error:
             self.status.config(text=f"Camera error: {error}")
-            self.start_button.config(state="disabled")
+            self.recorder.active = False
             self.undo_button.config(state="disabled")
-            self.release_camera()
+            self.stop_live()
             return
         self.after_id = self.root.after(15, self.tick)
 
-    def release_camera(self) -> None:
+    def stop_live(self) -> None:
+        if self.after_id is not None:
+            self.root.after_cancel(self.after_id)
+            self.after_id = None
         if self.camera is not None:
             self.camera.release()
             self.camera = None
         if self.detector is not None:
             self.detector.close()
             self.detector = None
+        self.last_timestamp = -1
+        self.save_check.config(state="normal")
+        self.folder_button.config(state="normal")
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
-        if self.after_id is not None:
-            self.root.after_cancel(self.after_id)
-        self.release_camera()
+        self.stop_live()
+        if self.image_detector is not None:
+            self.image_detector.close()
+            self.image_detector = None
         self.root.destroy()
 
 

@@ -3,5 +3,5 @@ __pycache__/
 .DS_Store
 /*.svg
 /*.png
-/durhack_word_list.csv
 /hand_landmarker.task
+/captures/
