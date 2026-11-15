@@ -8,14 +8,15 @@ from functools import lru_cache
 from pathlib import Path
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import xml.etree.ElementTree as ET
 
-from encoder import HAND_RADIX, encode, load_words
+from encoder import encode, load_words
+from full_encode import make_svg
 from make_hand import ASSETS, ROTATIONS, raised_fingers
 
 
-# Valarian-inspired Bright Architectural Monochrome Palette
+# Bright architectural monochrome palette
 BG_BASE = "#F4F6F9"       # Crisp cool alabaster window background
 BG_SURFACE = "#FFFFFF"    # Pure white bento card surface
 BG_ELEVATED = "#EEF2F6"   # Soft technical slate for stages & secondary controls
@@ -40,8 +41,8 @@ SANS_FONT = "Segoe UI" if sys.platform == "win32" else "TkDefaultFont"
 MONO_FONT = "Consolas" if sys.platform == "win32" else "TkFixedFont"
 
 
-def configure_valarian_theme(root: tk.Tk) -> None:
-    """Apply the bright Valarian architectural monochrome theme to ttk widgets."""
+def configure_theme(root: tk.Tk) -> None:
+    """Apply the bright architectural monochrome theme to ttk widgets."""
     root.configure(background=BG_BASE)
 
     style = ttk.Style(root)
@@ -114,7 +115,7 @@ def configure_valarian_theme(root: tk.Tk) -> None:
         darkcolor=[("focus", BORDER_FOCUS)],
     )
 
-    # High-contrast stark obsidian primary button (Valarian signature CTA)
+    # High-contrast stark obsidian primary button
     style.configure(
         "Primary.TButton",
         background=ACCENT_PRIMARY,
@@ -268,10 +269,10 @@ class EncoderGUI:
     def __init__(self, root: tk.Tk, vocabulary: list[str]) -> None:
         self.root = root
         self.vocabulary = vocabulary
-        root.title("VALARIAN // Hand Pose Encoder")
+        root.title("Hand Pose Encoder")
         root.geometry("860x900")
         root.minsize(640, 660)
-        configure_valarian_theme(root)
+        configure_theme(root)
 
         outer = ttk.Frame(root, padding=(24, 20, 24, 20))
         outer.pack(fill="both", expand=True)
@@ -283,7 +284,7 @@ class EncoderGUI:
         header_left.pack(side="left", fill="x", expand=True)
         ttk.Label(
             header_left,
-            text="OPTICAL ENCODING SYSTEM // BASE-244",
+            text="OPTICAL ENCODING SYSTEM",
             style="Eyebrow.TLabel",
         ).pack(anchor="w")
         ttk.Label(
@@ -339,12 +340,17 @@ class EncoderGUI:
             command=self.edit,
         ).pack(side="left", padx=(8, 0))
 
+        self.download_button = ttk.Button(
+            actions, text="DOWNLOAD SVG", command=self.download_svg, state="disabled"
+        )
+        self.download_button.pack(side="left", padx=(8, 0))
+
         self.status = ttk.Label(
-            actions,
+            control_panel,
             text="STATUS // READY FOR INPUT",
             style="Status.TLabel",
         )
-        self.status.pack(side="right", padx=(12, 0))
+        self.status.pack(anchor="w", pady=(12, 0))
 
         # Canvas Viewport framed with 1px structural border
         preview_border = tk.Frame(outer, bg=BORDER_SUBTLE, padx=1, pady=1)
@@ -363,7 +369,7 @@ class EncoderGUI:
     def render(self) -> None:
         words = [picker.value.get().strip().lower() for picker in self.pickers]
         try:
-            number, code, hands = encode(words, self.vocabulary)
+            _number, code, hands = encode(words, self.vocabulary)
         except ValueError as error:
             messagebox.showerror("Choose three valid words", str(error), parent=self.root)
             return
@@ -373,13 +379,30 @@ class EncoderGUI:
             picker.listbox.grid_remove()
         self.root.update_idletasks()
         self.status.config(
-            text=f"PHRASE: {' · '.join(words).upper()}   //   DENARY: {number:,}   //   BASE-{HAND_RADIX}: [{code}]"
+            text=f"PHRASE: {' · '.join(words).upper()}"
         )
+        self.download_button.config(state="normal")
         self._resize()
+
+    def download_svg(self) -> None:
+        if not self.hands:
+            return
+        filename = filedialog.asksaveasfilename(
+            parent=self.root, title="Download encoded hands",
+            defaultextension=".svg", initialfile="encoded_hands.svg",
+            filetypes=[("SVG image", "*.svg")],
+        )
+        if not filename:
+            return
+        try:
+            Path(filename).write_text(make_svg(self.hands), encoding="utf-8")
+        except OSError as error:
+            messagebox.showerror("Could not save SVG", str(error), parent=self.root)
 
     def edit(self) -> None:
         self.hands = None
         self.last_code = None
+        self.download_button.config(state="disabled")
         self.status.config(text="Edit any word above, then show the updated hands.")
         self._resize()
         self.pickers[0].entry.focus_set()
@@ -387,7 +410,7 @@ class EncoderGUI:
     def _draw_corner_ticks(
         self, x1: float, y1: float, x2: float, y2: float, length: float, color: str
     ) -> None:
-        """Draw Valarian-style precision corner reticle ticks on the canvas."""
+        """Draw precision corner reticle ticks on the canvas."""
         for cx, dx in ((x1, length), (x2, -length)):
             for cy, dy in ((y1, length), (y2, -length)):
                 self.preview.create_line(cx, cy, cx + dx, cy, fill=color, width=1)
@@ -441,13 +464,13 @@ class EncoderGUI:
             return
 
         # Fit all three pairs into the available window without clipping.
-        scale = max(0.05, min((width - 24) / 640, (height - 24) / 1110))
-        left = (width - 640 * scale) / 2
+        scale = max(0.05, min((width - 24) / 960, (height - 24) / 1110))
+        left = (width - 960 * scale) / 2
         top = (height - 1110 * scale) / 2
         for i, description in enumerate(self.hands):
             pair, side_index = divmod(i, 2)
             self._draw_hand_card(
-                left + side_index * 320 * scale,
+                left + side_index * 480 * scale,
                 top + pair * 370 * scale,
                 scale,
                 "R" if side_index else "L",
@@ -467,7 +490,7 @@ class EncoderGUI:
         """Draw the bundled SVG rectangles with the full_encode transforms."""
         view, direction, bits = description.split()
         x1, y1 = x + 10 * scale, y + 10 * scale
-        x2, y2 = x + 310 * scale, y + 360 * scale
+        x2, y2 = x + 470 * scale, y + 360 * scale
 
         # Outer White Bento Card
         self.preview.create_rectangle(
@@ -477,7 +500,7 @@ class EncoderGUI:
 
         # Inner Hand Viewport Stage
         stage_x1, stage_y1 = x + 26 * scale, y + 58 * scale
-        stage_x2, stage_y2 = x + 294 * scale, y + 312 * scale
+        stage_x2, stage_y2 = x + 454 * scale, y + 312 * scale
         self.preview.create_rectangle(
             stage_x1,
             stage_y1,
@@ -502,7 +525,7 @@ class EncoderGUI:
         )
         badge_color = ACCENT_TECH if view == "F" else TEXT_PRIMARY
         self.preview.create_text(
-            x + 294 * scale,
+            x + 454 * scale,
             header_y,
             text=f"{side} · {view_label} · {direction}",
             anchor="e",
@@ -518,7 +541,7 @@ class EncoderGUI:
             px, py = (px * 8 - 96) * mirror, py * 8 - 124
             for _ in range(turns):
                 px, py = -py, px
-            return x + (160 + px) * scale, y + (185 + py) * scale
+            return x + (240 + px) * scale, y + (185 + py) * scale
 
         for rx, ry, rw, rh, fill in pose_rectangles(view, bits):
             ax, ay = transform(rx, ry)
@@ -544,11 +567,11 @@ class EncoderGUI:
             fill=ACCENT_TECH,
         )
         self.preview.create_text(
-            x + 294 * scale,
+            x + 454 * scale,
             y + 336 * scale,
-            text=raised_fingers(bits),
+            text=raised_fingers(bits).removeprefix("Raised: "),
             anchor="e",
-            width=210 * scale,
+            width=330 * scale,
             font=(SANS_FONT, max(7, round(9 * scale))),
             fill=TEXT_SECONDARY,
         )

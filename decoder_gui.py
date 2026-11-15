@@ -21,7 +21,7 @@ HOLD_SECONDS = 3.0
 MOTION_TOLERANCE = 0.035  # Fraction of the camera frame, measured from hold start.
 RELEASE_SECONDS = 0.4
 
-# Valarian-inspired Bright Architectural Monochrome Palette
+# Bright architectural monochrome palette
 BG_BASE = "#F4F6F9"       # Crisp cool alabaster window background
 BG_SURFACE = "#FFFFFF"    # Pure white bento card surface
 BG_ELEVATED = "#EEF2F6"   # Soft technical slate for stages & secondary controls
@@ -40,8 +40,8 @@ SANS_FONT = "Segoe UI" if sys.platform == "win32" else "TkDefaultFont"
 MONO_FONT = "Consolas" if sys.platform == "win32" else "TkFixedFont"
 
 
-def configure_valarian_theme(root: tk.Tk) -> None:
-    """Apply the bright Valarian architectural monochrome theme to ttk widgets."""
+def configure_theme(root: tk.Tk) -> None:
+    """Apply the bright architectural monochrome theme to ttk widgets."""
     root.configure(background=BG_BASE)
 
     style = ttk.Style(root)
@@ -353,10 +353,10 @@ class DecoderGUI:
         self.saving_enabled = False
         self.output_directory = Path(__file__).with_name("captures")
 
-        root.title("VALARIAN // Optical Hand Signal Decoder")
+        root.title("Optical Hand Signal Decoder")
         root.geometry(f"1060x{min(880, root.winfo_screenheight() - 100)}")
         root.minsize(760, 520)
-        configure_valarian_theme(root)
+        configure_theme(root)
 
         # Pinned bottom result dock with hairline top border
         results_border = tk.Frame(root, bg=BORDER_SUBTLE, padx=1, pady=1)
